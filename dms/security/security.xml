@@ -65,7 +65,7 @@
         <field name="perm_unlink" eval="True" />
         <field
             name="domain_force"
-        >['|', ('locked_by', '=', False), ('locked_by', '=', user.id)]</field>
+        >['|', '|', ('locked_by', '=', False), ('locked_by', '=', user.id), (1, '=', 1 if user.has_group('dms.group_dms_manager') else 0)]</field>
     </record>
     <record id="rule_security_groups_user" model="ir.rule">
         <field name="name">DMS users can only edit and delete their own groups.</field>

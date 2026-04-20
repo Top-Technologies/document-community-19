@@ -77,7 +77,7 @@ class DmsSecurityMixin(models.AbstractModel):
 
         # Update according to presence when applying ir.rule
         self.invalidate_recordset()
-        if self.env.su:
+        if self.env.su or self.env.user.has_group("dms.group_dms_manager"):
             self.update(
                 {
                     "permission_create": True,
@@ -212,8 +212,8 @@ class DmsSecurityMixin(models.AbstractModel):
         # Tricky one, to know if you want to search
         # positive or negative access
         positive = (operator not in NEGATIVE_TERM_OPERATORS) == bool(value)
-        if _self.env.su:
-            # You're SUPERUSER_ID
+        if _self.env.su or _self.env.user.has_group("dms.group_dms_manager"):
+            # You're SUPERUSER_ID or DMS Manager
             return TRUE_DOMAIN if positive else FALSE_DOMAIN
 
         result = OR(
