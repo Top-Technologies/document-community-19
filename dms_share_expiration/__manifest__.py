@@ -19,8 +19,9 @@
         'security/ir.model.access.csv',
         'wizard/dms_share_wizard_views.xml',
         'views/dms_file_views.xml',
+        'views/dms_share_templates.xml',
     ],
     'installable': True,
     'application': False,
-    'license': 'LGPL-3',
+    'license': 'LGPL-3.0',
 }

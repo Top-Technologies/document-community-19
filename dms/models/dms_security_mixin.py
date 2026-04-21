@@ -8,10 +8,10 @@ from logging import getLogger
 
 from odoo import api, fields, models
 from odoo.exceptions import AccessError
+from odoo.fields import Domain
 from odoo.osv.expression import (
     FALSE_DOMAIN,
     NEGATIVE_TERM_OPERATORS,
-    OR,
     TRUE_DOMAIN,
 )
 from odoo.tools import SQL
@@ -153,7 +153,7 @@ class DmsSecurityMixin(models.AbstractModel):
             domains.append(
                 [("res_model", "=", model._name), ("res_id", "in", related_ok.ids)]
             )
-        result = inherited_access_domain + OR(domains)
+        result = inherited_access_domain + Domain.OR(domains)
         return result
 
     @api.model
@@ -216,7 +216,7 @@ class DmsSecurityMixin(models.AbstractModel):
             # You're SUPERUSER_ID or DMS Manager
             return TRUE_DOMAIN if positive else FALSE_DOMAIN
 
-        result = OR(
+        result = Domain.OR(
             [
                 _self._get_domain_by_access_groups(operation),
                 _self._get_domain_by_inheritance(operation),
