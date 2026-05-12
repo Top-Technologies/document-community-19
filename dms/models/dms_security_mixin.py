@@ -129,12 +129,15 @@ class DmsSecurityMixin(models.AbstractModel):
                 # This is normal if you are upgrading the database.
                 # Otherwise, you probably have garbage DMS data.
                 # These records will be accessible by DB users only.
-                domains.append(
-                    [
-                        ("res_model", "=", group["res_model"]),
-                        (True, "=", self.env.user.has_group("base.group_user")),
-                    ]
-                )
+                if self.env.user.has_group("base.group_user"):
+                    domains.append(
+                        [
+                            ("res_model", "=", group["res_model"]),
+                        ]
+                    )
+                else:
+                    # Non-internal users: skip these records (deny access)
+                    continue
                 continue
             # Check model access only once per batch
             try:
