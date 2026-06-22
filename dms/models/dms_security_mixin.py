@@ -203,26 +203,59 @@ class DmsSecurityMixin(models.AbstractModel):
         ]
         return result
 
+    def _get_own_groups_relation(self):
+        return None, None
+
+    @api.model
+    def _get_domain_by_own_access_groups(self, operation):
+        """Get domain for records accessible by their own access groups."""
+        relation, column = self._get_own_groups_relation()
+        if not relation:
+            return FALSE_DOMAIN
+        operation_check = {
+            "create": "AND dag.perm_inclusive_create",
+            "read": "",
+            "unlink": "AND dag.perm_inclusive_unlink",
+            "write": "AND dag.perm_inclusive_write",
+        }[operation]
+        select = f"""(
+            SELECT
+                {relation}.{column}
+            FROM
+                {relation}
+                INNER JOIN dms_access_group AS dag
+                    ON {relation}.gid = dag.id
+                INNER JOIN dms_access_group_users_rel AS users
+                    ON users.gid = dag.id
+            WHERE
+                users.uid = %s {operation_check}
+            )"""
+        return [("id", "in", SQL(select, self.env.uid))]
+
     @api.model
     def _get_permission_domain(self, operator, value, operation):
         """Abstract logic for searching computed permission fields."""
-        _self = self
-        # HACK ir.rule domain is always computed with sudo, so if this check is
-        # true, we can assume safely that you're checking permissions
-        if self.env.su and value == self.env.uid:
+        # Extract single value if it's a collection (e.g., OrderedSet in Odoo 19)
+        if isinstance(value, (list, tuple, set, frozenset)) or type(value).__name__ == 'OrderedSet':
+            value = list(value)[0] if value else False
+
+        if not isinstance(value, bool) and isinstance(value, int):
+            _self = self.with_user(value)
+            value = True
+        else:
+            # Drop sudo to correctly evaluate access groups for the actual user
             _self = self.sudo(False)
-            value = bool(value)
-        # Tricky one, to know if you want to search
-        # positive or negative access
+
         positive = (operator not in NEGATIVE_TERM_OPERATORS) == bool(value)
-        if _self.env.su or _self.env.user.has_group("dms.group_dms_manager"):
-            # You're SUPERUSER_ID or DMS Manager
+        
+        # Superuser (uid=1) or DMS Manager always has access
+        if _self.env.uid == 1 or _self.env.user.has_group("dms.group_dms_manager"):
             return TRUE_DOMAIN if positive else FALSE_DOMAIN
 
         result = Domain.OR(
             [
                 _self._get_domain_by_access_groups(operation),
-                _self._get_domain_by_inheritance(operation),
+                _self._get_domain_by_own_access_groups(operation),
             ]
         )
         if not positive:

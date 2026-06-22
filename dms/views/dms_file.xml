@@ -465,6 +465,7 @@
                         <page name="page_access" string="Access Information">
                             <group>
                                 <group>
+                                    <field name="group_ids" widget="many2many_tags" />
                                     <field name="permission_write" readonly="True" />
                                     <field name="permission_unlink" readonly="True" />
                                 </group>

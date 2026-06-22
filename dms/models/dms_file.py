@@ -47,7 +47,7 @@ class DMSFile(models.Model):
     directory_id = fields.Many2one(
         comodel_name="dms.directory",
         string="Directory",
-        domain="[('permission_create', '=', True)]",
+        domain="[('permission_read', '=', True)]",
         context={"dms_directory_show_path": True},
         ondelete="restrict",
         auto_join=True,
@@ -84,6 +84,14 @@ class DMSFile(models.Model):
         column2="tid",
         domain="['|', ('category_id', '=', False),('category_id', '=?', category_id)]",
         string="Tags",
+    )
+
+    group_ids = fields.Many2many(
+        comodel_name="dms.access.group",
+        relation="dms_file_groups_rel",
+        column1="fid",
+        column2="gid",
+        string="Groups",
     )
 
     content = fields.Binary(
@@ -149,6 +157,9 @@ class DMSFile(models.Model):
                 "image/svg+xml",
             ):
                 one.image_1920 = one.content
+
+    def _get_own_groups_relation(self):
+        return "dms_file_groups_rel", "fid"
 
     def check_access(self, operation):
         self.mapped("directory_id").check_access(operation)

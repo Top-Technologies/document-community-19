@@ -66,7 +66,7 @@ class DmsDirectory(models.Model):
     parent_id = fields.Many2one(
         comodel_name="dms.directory",
         string="Parent Directory",
-        domain="[('permission_create', '=', True)]",
+        domain="[('permission_read', '=', True)]",
         ondelete="restrict",
         # Access to a directory doesn't necessarily mean access its parent, so
         # prefetching this field could lead to misleading access errors
@@ -192,7 +192,16 @@ class DmsDirectory(models.Model):
         compute="_compute_human_size", string="Size (human readable)"
     )
 
-    inherit_group_ids = fields.Boolean(string="Inherit Groups", default=True)
+    inherit_group_ids = fields.Boolean(string="Inherit Groups", default=False)
+
+    permission_path = fields.Boolean(
+        compute="_compute_permission_path",
+        search="_search_permission_path",
+        string="Path Navigation Access",
+        help="True when the user can see this directory only as a navigation "
+        "ancestor (breadcrumb / tree) of a directory they actually have "
+        "access to.  They cannot see files or subdirectories inside.",
+    )
 
     alias_process = fields.Selection(
         selection=[("files", "Single Files"), ("directory", "Subdirectory")],
@@ -210,27 +219,142 @@ class DmsDirectory(models.Model):
     )
 
     @api.model
+    def _get_ancestor_directories_query(self):
+        """Return a SQL subquery selecting IDs of directories that are ancestors
+        of any directory the current user has real read access to (via access
+        groups).  These directories are visible for navigation / path display
+        only — the user cannot see their contents unless they also have direct
+        access.
+        """
+        from odoo.tools import SQL
+
+        # SQL() supports composing sub-queries by passing them as positional
+        # arguments — %s in the template is replaced with the rendered sub-SQL.
+        access_query = self._get_access_groups_query("read")
+        return SQL(
+            """(
+                SELECT DISTINCT ancestor.id
+                FROM dms_directory ancestor
+                JOIN dms_directory accessible
+                    ON accessible.parent_path LIKE ancestor.parent_path || '%%'
+                    AND accessible.id != ancestor.id
+                WHERE accessible.id IN %s
+                  AND ancestor.is_hidden = FALSE
+            )""",
+            access_query,
+        )
+
+    @api.model
     def _get_domain_by_access_groups(self, operation):
-        """Special rules for directories."""
+        """Override to handle the two directory-specific read cases:
+
+        - **Direct access**: the user has a DMS access group on this directory
+          (or it is inherited).  These directories behave normally.
+        - **Path / ancestor access (read only)**: the user has direct access to
+          a *descendant* directory.  The ancestor directories on the path up to
+          that descendant must be readable so the user can navigate to it, but
+          the user should NOT see any files or subdirectories inside those
+          ancestor directories that they do not have direct access to.
+        """
+        from odoo.tools import SQL  # noqa: local import keeps it optional
+
+        # Domain that grants access to directories the user directly has rights
+        # on (the base implementation already handles this correctly for files).
         self_filter = [
             ("storage_id_inherit_access_from_parent_record", "=", False),
             ("id", "in", self._get_access_groups_query(operation)),
         ]
-        # Upstream only filters by parent directory
-        result = super()._get_domain_by_access_groups(operation)
+
         if operation == "create":
-            # When creating, I need create access in parent directory, or
-            # self-create permission if it's a root directory
-            result = Domain.OR(
+            # Creation requires create access on the *parent* directory, or
+            # create access on the directory itself if it is a root directory.
+            parent_filter = super()._get_domain_by_access_groups(operation)
+            return Domain.OR(
                 [
-                    [("is_root_directory", "=", False)] + result,
+                    [("is_root_directory", "=", False)] + parent_filter,
                     [("is_root_directory", "=", True)] + self_filter,
                 ]
             )
+
+        if operation == "read":
+            # Users can read directories they have direct access to AND any
+            # ancestor directory on the path to those directories so that
+            # breadcrumbs, search panels, and the tree view are usable.
+            ancestor_query = self._get_ancestor_directories_query()
+            return Domain.OR(
+                [
+                    self_filter,
+                    [
+                        ("storage_id_inherit_access_from_parent_record", "=", False),
+                        ("id", "in", ancestor_query),
+                    ],
+                ]
+            )
+
+        # write / unlink: only directly accessible directories
+        return self_filter
+
+    @api.model
+    def _get_domain_for_path_only(self):
+        """Return a domain that matches directories visible *only* as navigation
+        ancestors (i.e. the user has no direct access group on them).  Used by
+        ``permission_path`` to drive the ``is_path_only`` distinction in the UI.
+        """
+        from odoo.tools import SQL  # noqa
+
+        direct_access = self._get_access_groups_query("read")
+        ancestor_query = self._get_ancestor_directories_query()
+        return [
+            ("storage_id_inherit_access_from_parent_record", "=", False),
+            ("id", "in", ancestor_query),
+            ("id", "not in", direct_access),
+        ]
+
+    def _compute_permission_path(self):
+        """Compute whether each directory is visible only as a path ancestor.
+
+        - DMS Managers and superusers: always False (they have full access, not
+          path-only access).
+        - For regular users: True when the directory is reachable as an ancestor
+          of an accessible directory but the user has no direct access group on
+          this specific directory.
+        """
+        if self.env.su or self.env.user.has_group("dms.group_dms_manager"):
+            for record in self:
+                record.permission_path = False
+            return
+
+        path_only_domain = self._get_domain_for_path_only()
+        path_only_dirs = self.sudo(False).search(path_only_domain)
+        for record in self:
+            record.permission_path = record in path_only_dirs
+
+    @api.model
+    def _search_permission_path(self, operator, value):
+        """Search method for the ``permission_path`` field.
+
+        Supports ``('permission_path', '=', True/False)`` and the common
+        ``('permission_path', '=', user.id)`` pattern used by ir.rules.
+        """
+        from odoo.osv.expression import NEGATIVE_TERM_OPERATORS, TRUE_DOMAIN, FALSE_DOMAIN  # noqa
+
+        # Normalise user.id → True (same pattern as _get_permission_domain)
+        if not isinstance(value, bool) and isinstance(value, int):
+            _self = self.with_user(value)
+            value = True
         else:
-            # In other operations, I only need self access
-            result = self_filter
-        return result
+            _self = self.sudo(False)
+
+        positive = (operator not in NEGATIVE_TERM_OPERATORS) == bool(value)
+
+        # Managers / superusers have no path-only directories (full access)
+        if _self.env.uid == 1 or _self.env.user.has_group("dms.group_dms_manager"):
+            return FALSE_DOMAIN if positive else TRUE_DOMAIN
+
+        domain = _self._get_domain_for_path_only()
+        if not positive:
+            domain.insert(0, "!")
+        return domain
 
     def _compute_access_url(self):
         res = super()._compute_access_url()
@@ -462,7 +586,63 @@ class DmsDirectory(models.Model):
             )
             record.size = sum(rec.get("size", 0) for rec in recs)
 
+    def get_children(self):
+        """
+        Returns a unified list of children (directories and files) for the current directory.
+        Used by the Windows-like Explorer UI.
+        """
+        self.ensure_one()
+        res = []
+
+        # 1. Fetch Subdirectories
+        subdirs = self.child_directory_ids.search_read(
+            [("id", "in", self.child_directory_ids.ids)],
+            ["id", "name", "complete_name"]
+        )
+        for sd in subdirs:
+            res.append({
+                "id": sd["id"],
+                "name": sd["name"],
+                "type": "folder",
+                "model": "dms.directory",
+                "complete_name": sd["complete_name"],
+            })
+
+        # 2. Fetch Files
+        files = self.env["dms.file"].search_read(
+            [("directory_id", "=", self.id)],
+            ["id", "name", "size"]
+        )
+        for f in files:
+            res.append({
+                "id": f["id"],
+                "name": f["name"],
+                "type": "file",
+                "model": "dms.file",
+                "size": f["size"],
+            })
+
+        # Sort: Folders first, then Alphabetically
+        res.sort(key=lambda x: (x["type"] != "folder", x["name"].lower()))
+        return res
+
+    def get_breadcrumb_path(self):
+        """
+        Returns the list of ancestor directories including self for breadcrumbs.
+        """
+        self.ensure_one()
+        path = []
+        current = self
+        while current:
+            path.insert(0, {
+                "id": current.id,
+                "name": current.name,
+            })
+            current = current.parent_id
+        return path
+
     @api.depends("size")
+
     def _compute_human_size(self):
         for item in self:
             item.human_size = human_size(item.size) if item.size else False
@@ -737,6 +917,9 @@ class DmsDirectory(models.Model):
         return super()._search_panel_domain_image(
             field_name=field_name, domain=domain, set_count=set_count, limit=limit
         )
+
+    def _get_own_groups_relation(self):
+        return "dms_directory_groups_rel", "aid"
 
     def action_dms_directories_all_directory(self):
         self.ensure_one()
